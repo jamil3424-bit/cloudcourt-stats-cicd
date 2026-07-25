@@ -1,0 +1,50 @@
+name: Deploy CloudCourt Stats API
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO: cloudcourt-stats
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          docker build --platform linux/arm64 -t $REGISTRY/$ECR_REPO:v1 .
+          docker push $REGISTRY/$ECR_REPO:v1
+
+      - name: Redeploy on EC2 via SSM
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=cloudcourt-server" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin '"$(aws sts get-caller-identity --query Account --output text)"'.dkr.ecr.us-east-1.amazonaws.com",
+              "docker pull '"$(aws sts get-caller-identity --query Account --output text)"'.dkr.ecr.us-east-1.amazonaws.com/cloudcourt-stats:v1",
+              "docker stop $(docker ps -q) || true",
+              "docker run -d -p 5000:5000 --restart unless-stopped '"$(aws sts get-caller-identity --query Account --output text)"'.dkr.ecr.us-east-1.amazonaws.com/cloudcourt-stats:v1"
+            ]'
