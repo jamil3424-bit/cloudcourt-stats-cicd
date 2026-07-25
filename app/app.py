@@ -4,7 +4,7 @@ app = Flask(__name__)
 
 players = [
     {"id": 1, "name": "Point God", "ppg": 18.4, "apg": 11.2},
-    {"id": 2, "name": "Splash Wing", "ppg": 27.9, "apg": 4.1},
+    {"id": 2, "name": "Splash Wing", "ppg": 28.1, "apg": 4.1},
     {"id": 3, "name": "Rim Protector", "ppg": 12.3, "bpg": 3.5},
 ]
 
