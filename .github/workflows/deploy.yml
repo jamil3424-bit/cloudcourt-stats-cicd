@@ -35,10 +35,52 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v
 
+  # This environment is applied for a demo and destroyed afterwards to hold
+  # spend at zero. When nothing is running there is no deploy to perform —
+  # that is an intentional state, not a broken pipeline, so the deploy job is
+  # skipped rather than failed. It never reports a deploy that didn't happen.
+  preflight:
+    name: Check deploy target
+    needs: test
+    runs-on: ubuntu-latest
+
+    outputs:
+      deployable: ${{ steps.check.outputs.deployable }}
+      instance_id: ${{ steps.check.outputs.instance_id }}
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: cloudcourt-preflight-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Look for a running instance
+        id: check
+        run: |
+          set -euo pipefail
+
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=cloudcourt-server" \
+                      "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+
+          if [ "$INSTANCE_ID" = "None" ] || [ -z "$INSTANCE_ID" ]; then
+            echo "deployable=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy skipped::No running cloudcourt-server instance. The environment is torn down (terraform destroy) to avoid idle cost. Image build and deploy skipped; run terraform apply to bring it back."
+          else
+            echo "deployable=true" >> "$GITHUB_OUTPUT"
+            echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy target::$INSTANCE_ID"
+          fi
+
   build-and-deploy:
     name: Build and deploy
     # The gate: a red test run stops the pipeline before anything is built or shipped.
-    needs: test
+    needs: [test, preflight]
+    if: needs.preflight.outputs.deployable == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -74,19 +116,10 @@ jobs:
         env:
           REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
+          INSTANCE_ID: ${{ needs.preflight.outputs.instance_id }}
         run: |
           set -euo pipefail
 
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=cloudcourt-server" \
-                      "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].InstanceId" \
-            --output text)
-
-          if [ "$INSTANCE_ID" = "None" ] || [ -z "$INSTANCE_ID" ]; then
-            echo "No running cloudcourt-server instance found."
-            exit 1
-          fi
           echo "Deploying to $INSTANCE_ID"
 
           IMAGE="$REGISTRY/$ECR_REPO:$IMAGE_TAG"
@@ -119,14 +152,9 @@ jobs:
       - name: Verify deploy succeeded
         env:
           COMMAND_ID: ${{ steps.deploy.outputs.command_id }}
+          INSTANCE_ID: ${{ needs.preflight.outputs.instance_id }}
         run: |
           set -euo pipefail
-
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=cloudcourt-server" \
-                      "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].InstanceId" \
-            --output text)
 
           for _ in $(seq 1 30); do
             STATUS=$(aws ssm get-command-invocation \

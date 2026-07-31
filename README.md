@@ -124,6 +124,8 @@ State is local and **gitignored** (`terraform/*.tfstate`) — it is not in this 
 
 **Apply → deploy → destroy, repeatedly.** The environment is rebuilt from scratch rather than kept running, which both proves the Terraform is genuinely reproducible and holds spend at zero between demos.
 
+**A torn-down environment is not a failed build.** Because the infrastructure only exists during a demo, a push on any other day has nothing to deploy to. A `preflight` job checks for a running instance first: if there isn't one it emits a notice and the deploy job is **skipped**, so tests still run and the pipeline reflects reality instead of going red over a deliberate cost decision. It never reports a deploy that didn't happen — the deploy either runs and is health-checked, or it is visibly skipped.
+
 **Dependency layer ordering.** Copying `requirements.txt` ahead of `app/` means an application change doesn't reinstall Flask and gunicorn.
 
 **`send-command` is fire-and-forget.** It returns a command ID the moment SSM accepts the request, not when the container is running. Trusting that return value would turn every deploy green regardless of outcome, so the pipeline polls `get-command-invocation` until the command reaches a terminal state and prints the instance's stdout and stderr when it fails. The remote command ends in `curl --fail http://localhost:5000/health`, which makes a container that starts and immediately crashes a **failed deploy** rather than a silent one.
