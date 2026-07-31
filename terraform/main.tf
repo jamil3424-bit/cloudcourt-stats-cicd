@@ -79,13 +79,35 @@ resource "aws_instance" "cloudcourt_server" {
   vpc_security_group_ids = [aws_security_group.cloudcourt_sg.id]
   iam_instance_profile   = aws_iam_instance_profile.cloudcourt_profile.name
 
+  # Images are tagged by commit SHA, so there is no fixed tag to bootstrap from.
+  # A fresh instance resolves the most recently pushed image out of ECR instead.
+  # (ecr:DescribeImages comes from AmazonEC2ContainerRegistryReadOnly, already
+  # attached to this instance profile.)
   user_data = <<-EOF
     #!/bin/bash
+    set -euxo pipefail
+
     dnf install -y docker
-    systemctl start docker
-    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${aws_ecr_repository.cloudcourt.repository_url}
-    docker pull ${aws_ecr_repository.cloudcourt.repository_url}:v1
-    docker run -d -p 5000:5000 --restart unless-stopped ${aws_ecr_repository.cloudcourt.repository_url}:v1
+    systemctl enable --now docker
+
+    REPO_URL="${aws_ecr_repository.cloudcourt.repository_url}"
+
+    aws ecr get-login-password --region us-east-1 \
+      | docker login --username AWS --password-stdin "$REPO_URL"
+
+    IMAGE_TAG=$(aws ecr describe-images \
+      --repository-name ${aws_ecr_repository.cloudcourt.name} \
+      --region us-east-1 \
+      --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' \
+      --output text)
+
+    if [ "$IMAGE_TAG" = "None" ] || [ -z "$IMAGE_TAG" ]; then
+      echo "No image in ECR yet — push to main to trigger the pipeline."
+      exit 0
+    fi
+
+    docker pull "$REPO_URL:$IMAGE_TAG"
+    docker run -d -p 5000:5000 --restart unless-stopped "$REPO_URL:$IMAGE_TAG"
   EOF
 
   tags = {

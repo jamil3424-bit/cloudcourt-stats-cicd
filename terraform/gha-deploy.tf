@@ -1,22 +1,69 @@
 data "aws_caller_identity" "current" {
 }
 
+locals {
+  github_repo = "jamil3424-bit/cloudcourt-stats-cicd"
+}
+
 resource "aws_iam_role_policy_attachment" "ssm_core" {
   role       = aws_iam_role.ec2_ecr_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_user" "gha_deploy" {
-  name = "cloudcourt-gha-deploy"
+# --- GitHub Actions OIDC ---------------------------------------------------
+# GitHub issues each workflow run a short-lived OIDC token. AWS trusts that
+# issuer directly, so CI assumes a role instead of holding an access key.
+#
+# If this account already has the GitHub provider registered, import it rather
+# than creating a second one:
+#   terraform import aws_iam_openid_connect_provider.github \
+#     arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com
+
+resource "aws_iam_openid_connect_provider" "github" {
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
+  thumbprint_list = [
+    "6938fd4d98bab03faadb97b34396831e3780aea1",
+    "1c58a3a8518e8759bf075b76b750d4f2df264fcd",
+  ]
 
   tags = {
     Project = "cloudcourt-stats-cicd"
   }
 }
 
-resource "aws_iam_user_policy" "gha_deploy_policy" {
+resource "aws_iam_role" "gha_deploy" {
+  name        = "cloudcourt-gha-deploy-role"
+  description = "Assumed by GitHub Actions via OIDC to build, push, and deploy CloudCourt Stats"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = aws_iam_openid_connect_provider.github.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          # Scoped to pushes on main of this one repository. A fork, a pull
+          # request, or any other repo presents a different subject and is
+          # refused by STS before it ever reaches a permission check.
+          "token.actions.githubusercontent.com:sub" = "repo:${local.github_repo}:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
+
+  tags = {
+    Project = "cloudcourt-stats-cicd"
+  }
+}
+
+resource "aws_iam_role_policy" "gha_deploy_policy" {
   name = "cloudcourt-gha-deploy-policy"
-  user = aws_iam_user.gha_deploy.name
+  role = aws_iam_role.gha_deploy.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -42,14 +89,19 @@ resource "aws_iam_user_policy" "gha_deploy_policy" {
         Resource = aws_ecr_repository.cloudcourt.arn
       },
       {
-        Sid      = "SsmDeploy"
+        Sid      = "FindDeployTarget"
         Effect   = "Allow"
-        Action   = "ssm:SendCommand"
+        Action   = "ec2:DescribeInstances"
+        Resource = "*"
+      },
+      {
+        Sid    = "SsmDeploy"
+        Effect = "Allow"
+        Action = "ssm:SendCommand"
         Resource = [
-            "arn:aws:ssm:us-east-1::document/AWS-RunShellScript",
-            "arn:aws:ec2:us-east-1:${data.aws_caller_identity.current.account_id}:instance/*"
-          ]
-
+          "arn:aws:ssm:us-east-1::document/AWS-RunShellScript",
+          "arn:aws:ec2:us-east-1:${data.aws_caller_identity.current.account_id}:instance/*"
+        ]
       },
       {
         Sid      = "SsmCheckResult"
@@ -59,4 +111,9 @@ resource "aws_iam_user_policy" "gha_deploy_policy" {
       }
     ]
   })
+}
+
+output "gha_deploy_role_arn" {
+  description = "Set this as the AWS_DEPLOY_ROLE_ARN repository secret in GitHub."
+  value       = aws_iam_role.gha_deploy.arn
 }
