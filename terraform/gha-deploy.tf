@@ -3,6 +3,10 @@ data "aws_caller_identity" "current" {
 
 locals {
   github_repo = "jamil3424-bit/cloudcourt-stats-cicd"
+
+  # The same repository as GitHub sometimes spells it in the OIDC `sub` claim,
+  # with the immutable numeric owner and repository IDs attached.
+  github_repo_qualified = "jamil3424-bit@301163393/cloudcourt-stats-cicd@1311640456"
 }
 
 resource "aws_iam_role_policy_attachment" "ssm_core" {
@@ -47,10 +51,23 @@ resource "aws_iam_role" "gha_deploy" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          # Scoped to pushes on main of this one repository. A fork, a pull
-          # request, or any other repo presents a different subject and is
-          # refused by STS before it ever reaches a permission check.
-          "token.actions.githubusercontent.com:sub" = "repo:${local.github_repo}:ref:refs/heads/main"
+        }
+        # Scoped to pushes on main of this one repository. A fork, a pull
+        # request, or any other repo presents a different subject and is
+        # refused by STS before it ever reaches a permission check.
+        #
+        # Two accepted subjects, because GitHub does not always emit the
+        # documented `repo:OWNER/NAME:ref:...` form — it may append the
+        # immutable numeric owner and repository IDs (`OWNER@301163393`,
+        # `NAME@1311640456`). Both are listed literally rather than matched
+        # with a wildcard: a pattern like `jamil3424-bit*` would also accept
+        # an account named `jamil3424-bit-something`. A list of exact strings
+        # is an OR with no such widening.
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = [
+            "repo:${local.github_repo}:ref:refs/heads/main",
+            "repo:${local.github_repo_qualified}:ref:refs/heads/main",
+          ]
         }
       }
     }]
